@@ -53,6 +53,12 @@ public class OccupancySplitter {
     // the main part
     var chainOccupancy = readOccupancyInfo(data);
     var chainsFractionalOccupancy = findChainsWithFractionalOccupancy(chainOccupancy);
+
+    if (chainsFractionalOccupancy.size() < 2) {
+      System.out.println("No clashes detected!");
+      System.exit(0);
+    }
+
     var chainAtoms = findPhosphorusAtoms(data, chainsFractionalOccupancy);
     var chainClashes = buildGraphOfClashes(chainAtoms);
     var allSolutions = findClashfreeChainCombinations(chainsFractionalOccupancy, chainClashes);
