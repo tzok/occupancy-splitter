@@ -38,19 +38,25 @@ public class OccupancySplitter {
 
     // the main part
     var chainOccupancy = readOccupancyInfo(data);
-    var chainsFractionalOccupancy = findChainsWithFractionalOccupancy(chainOccupancy);
+    var chainsToCheck =
+        commandLine.hasOption("all-chains")
+            ? selectAllChains(chainOccupancy)
+            : findChainsWithFractionalOccupancy(chainOccupancy);
+    var chainAtoms = findPhosphorusAtoms(data, chainsToCheck);
+    var chainClashes = buildGraphOfClashes(chainAtoms);
 
-    if (chainsFractionalOccupancy.size() < 2) {
+    if (chainClashes.isEmpty()) {
       System.out.println("No clashes detected!");
       System.exit(0);
     }
 
-    var chainAtoms = findPhosphorusAtoms(data, chainsFractionalOccupancy);
-    var chainClashes = buildGraphOfClashes(chainAtoms);
-    var allSolutions = findClashfreeChainCombinations(chainsFractionalOccupancy, chainClashes);
+    var allSolutions = findClashfreeChainCombinations(chainsToCheck, chainClashes);
     var selectedSolutions = leaveOnlyLargestSubsets(allSolutions);
-    createOutputFiles(
-        inputPath, mmCifFile, chainOccupancy, chainsFractionalOccupancy, selectedSolutions);
+    createOutputFiles(inputPath, mmCifFile, chainOccupancy, chainsToCheck, selectedSolutions);
+  }
+
+  private static Set<String> selectAllChains(Map<String, Double> chainOccupancy) {
+    return new HashSet<>(chainOccupancy.keySet());
   }
 
   private static void createOutputFiles(
@@ -210,14 +216,17 @@ public class OccupancySplitter {
 
   private static Map<String, Set<String>> buildGraphOfClashes(
       Map<String, List<ImmutableAtom>> atoms) {
-    return Sets.combinations(atoms.keySet(), 2).stream()
-        .map(strings -> strings.toArray(new String[2]))
-        .filter(chains -> OccupancySplitter.areClashing(atoms.get(chains[0]), atoms.get(chains[1])))
-        .flatMap(strings -> Stream.of(strings, new String[] {strings[1], strings[0]}))
-        .collect(
-            Collectors.groupingBy(
-                strings -> strings[0],
-                Collectors.mapping(strings -> strings[1], Collectors.toSet())));
+    return atoms.size() < 2
+        ? Collections.emptyMap()
+        : Sets.combinations(atoms.keySet(), 2).stream()
+            .map(strings -> strings.toArray(new String[2]))
+            .filter(
+                chains -> OccupancySplitter.areClashing(atoms.get(chains[0]), atoms.get(chains[1])))
+            .flatMap(strings -> Stream.of(strings, new String[] {strings[1], strings[0]}))
+            .collect(
+                Collectors.groupingBy(
+                    strings -> strings[0],
+                    Collectors.mapping(strings -> strings[1], Collectors.toSet())));
   }
 
   private static boolean areClashing(List<? extends Atom> chain1, List<? extends Atom> chain2) {
@@ -282,6 +291,11 @@ public class OccupancySplitter {
   private static CommandLine handleCommandLine(String[] args) throws ParseException {
     var options = new Options();
     options.addOption("i", "input", true, "(required) path to input file");
+    options.addOption(
+        "a",
+        "all-chains",
+        false,
+        "(optional) check all chains for clashes, not only those with occupancy < 1.0");
 
     var parser = new DefaultParser();
     var commandLine = parser.parse(options, args);
