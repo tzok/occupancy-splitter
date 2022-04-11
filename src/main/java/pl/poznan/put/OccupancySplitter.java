@@ -1,11 +1,7 @@
 package pl.poznan.put;
 
 import com.google.common.collect.Sets;
-import org.apache.commons.cli.CommandLine;
-import org.apache.commons.cli.DefaultParser;
-import org.apache.commons.cli.HelpFormatter;
-import org.apache.commons.cli.Options;
-import org.apache.commons.cli.ParseException;
+import org.apache.commons.cli.*;
 import org.apache.commons.lang3.tuple.Pair;
 import org.apache.commons.math3.geometry.euclidean.threed.Vector3D;
 import org.rcsb.cif.CifBuilder;
@@ -13,11 +9,7 @@ import org.rcsb.cif.CifIO;
 import org.rcsb.cif.model.FloatColumn;
 import org.rcsb.cif.model.IntColumn;
 import org.rcsb.cif.model.StrColumn;
-import org.rcsb.cif.schema.DelegatingFloatColumn;
-import org.rcsb.cif.schema.DelegatingIntColumn;
-import org.rcsb.cif.schema.DelegatingStrColumn;
 import org.rcsb.cif.schema.StandardSchemata;
-import org.rcsb.cif.schema.mm.AtomSite;
 import org.rcsb.cif.schema.mm.MmCifBlock;
 import org.rcsb.cif.schema.mm.MmCifFile;
 import org.slf4j.Logger;
@@ -26,13 +18,7 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Locale;
-import java.util.Map;
-import java.util.Set;
+import java.util.*;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
@@ -64,12 +50,12 @@ public class OccupancySplitter {
     var allSolutions = findClashfreeChainCombinations(chainsFractionalOccupancy, chainClashes);
     var selectedSolutions = leaveOnlyLargestSubsets(allSolutions);
     createOutputFiles(
-        inputPath, data, chainOccupancy, chainsFractionalOccupancy, selectedSolutions);
+        inputPath, mmCifFile, chainOccupancy, chainsFractionalOccupancy, selectedSolutions);
   }
 
   private static void createOutputFiles(
       String inputPath,
-      MmCifBlock data,
+      MmCifFile original,
       Map<String, Double> chainOccupancy,
       Set<String> chainsFractionalOccupancy,
       List<Set<String>> selectedSolutions)
@@ -80,8 +66,7 @@ public class OccupancySplitter {
               .filter(
                   key -> acceptedChains.contains(key) || !chainsFractionalOccupancy.contains(key))
               .collect(Collectors.toSet());
-      var outFile =
-          OccupancySplitter.createCifCopyWithChainSelection(data.getAtomSite(), currentSolution);
+      var outFile = OccupancySplitter.createCifCopyWithChainSelection(original, currentSolution);
       var base = inputPath.replace(".cif", "");
       var currentName = acceptedChains.stream().sorted().collect(Collectors.joining("-"));
       var outPath = Path.of(String.format("%s-%s.cif", base, currentName));
@@ -91,43 +76,91 @@ public class OccupancySplitter {
   }
 
   private static MmCifFile createCifCopyWithChainSelection(
-      AtomSite atomSite, Set<String> acceptedChains) {
-    var atomSiteBuilder =
-        CifBuilder.enterFile(StandardSchemata.MMCIF).enterBlock("data").enterAtomSite();
+      MmCifFile original, Set<String> acceptedChains) {
+    // gather indices of atoms which should stay
+    var originalAtomSite = original.getFirstBlock().getAtomSite();
+    var acceptedIndices =
+        IntStream.range(0, originalAtomSite.getRowCount())
+            .filter(i -> acceptedChains.contains(originalAtomSite.getLabelAsymId().get(i)))
+            .boxed()
+            .collect(Collectors.toList());
 
-    atomSite
-        .getColumns()
-        .forEach(
-            (key, column) -> {
-              var name = column.getColumnName();
-              if (column instanceof StrColumn) {
-                var builder = atomSiteBuilder.enterStrColumn(name);
-                IntStream.range(0, atomSite.getRowCount())
-                    .filter(i -> acceptedChains.contains(atomSite.getLabelAsymId().get(i)))
-                    .forEach(
-                        i ->
-                            builder.add(atomSite.getColumn(name, DelegatingStrColumn::new).get(i)));
-              } else if (column instanceof IntColumn) {
-                var builder = atomSiteBuilder.enterIntColumn(name);
-                IntStream.range(0, atomSite.getRowCount())
-                    .filter(i -> acceptedChains.contains(atomSite.getLabelAsymId().get(i)))
-                    .forEach(
-                        i ->
-                            builder.add(atomSite.getColumn(name, DelegatingIntColumn::new).get(i)));
-              } else if (column instanceof FloatColumn) {
-                var builder = atomSiteBuilder.enterFloatColumn(name);
-                IntStream.range(0, atomSite.getRowCount())
-                    .filter(i -> acceptedChains.contains(atomSite.getLabelAsymId().get(i)))
-                    .forEach(
-                        i ->
-                            builder.add(
-                                atomSite.getColumn(name, DelegatingFloatColumn::new).get(i)));
-              } else {
-                OccupancySplitter.LOGGER.error("Invalid column: {}", column);
-              }
-            });
+    var fileBuilder = CifBuilder.enterFile(StandardSchemata.MMCIF);
 
-    return atomSiteBuilder.leaveCategory().leaveBlock().leaveFile();
+    for (var block : original.getBlocks()) {
+      var blockBuilder = fileBuilder.enterBlock(block.getBlockHeader());
+
+      for (var categoryEntry : block.getCategories().entrySet()) {
+        var categoryName = categoryEntry.getKey();
+        var category = categoryEntry.getValue();
+        var categoryBuilder = blockBuilder.enterCategory(categoryName);
+
+        if ("atom_site".equals(categoryName)) {
+          // in atom_site, copy only selected lines
+          for (var columnEntry : category.getColumns().entrySet()) {
+            var columnName = columnEntry.getKey();
+            var column = columnEntry.getValue();
+
+            if (column instanceof StrColumn) {
+              categoryBuilder
+                  .enterStrColumn(columnName)
+                  .add(
+                      acceptedIndices.stream()
+                          .map(i -> ((StrColumn) column).get(i))
+                          .toArray(String[]::new))
+                  .leaveColumn();
+            } else if (column instanceof IntColumn) {
+              categoryBuilder
+                  .enterIntColumn(columnName)
+                  .add(
+                      acceptedIndices.stream().mapToInt(i -> ((IntColumn) column).get(i)).toArray())
+                  .leaveColumn();
+            } else if (column instanceof FloatColumn) {
+              categoryBuilder
+                  .enterFloatColumn(columnName)
+                  .add(
+                      acceptedIndices.stream()
+                          .mapToDouble(i -> ((FloatColumn) column).get(i))
+                          .toArray())
+                  .leaveColumn();
+            } else {
+              OccupancySplitter.LOGGER.error("Invalid column: {}", column);
+            }
+          }
+        } else {
+          // in categories other than atom_site, copy everything as it is
+          for (var columnEntry : category.getColumns().entrySet()) {
+            var columnName = columnEntry.getKey();
+            var column = columnEntry.getValue();
+
+            if (column instanceof StrColumn) {
+              categoryBuilder
+                  .enterStrColumn(columnName)
+                  .add(((StrColumn) column).values().toArray(String[]::new))
+                  .leaveColumn();
+            } else if (column instanceof IntColumn) {
+              categoryBuilder
+                  .enterIntColumn(columnName)
+                  .add(((IntColumn) column).values().toArray())
+                  .leaveColumn();
+            } else if (column instanceof FloatColumn) {
+              categoryBuilder
+                  .enterFloatColumn(columnName)
+                  .add(((FloatColumn) column).values().toArray())
+                  .leaveColumn();
+            } else {
+              OccupancySplitter.LOGGER.error("Invalid column: {}", column);
+            }
+          }
+        }
+
+        categoryBuilder.leaveCategory();
+      }
+
+      blockBuilder.leaveBlock();
+    }
+
+    return fileBuilder.leaveFile();
   }
 
   private static List<Set<String>> leaveOnlyLargestSubsets(List<Set<String>> solutions) {
